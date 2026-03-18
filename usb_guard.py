@@ -213,6 +213,15 @@ def get_target_pids():
     return pids
 
 
+def wait_until_app_stopped(timeout_sec=120):
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        if not get_target_pids():
+            return True
+        time.sleep(0.25)
+    return False
+
+
 def restore():
     if os.path.exists(ORIGINAL_DLL):
         dest_dir = os.path.dirname(TARGET_DLL)
@@ -225,6 +234,15 @@ def restore():
                 time.sleep(0.25)
         return False
     return True
+
+
+def restore_with_wait(timeout_sec=120):
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        if restore():
+            return True
+        time.sleep(0.25)
+    return False
 
 
 def launch():
@@ -251,14 +269,90 @@ def launch():
         return None
 
 
+def ps_quote(value):
+    return value.replace("'", "''")
+
+
+def start_restore_watchdog(app_pid=None, watch_usb=False):
+    if not os.path.exists(ORIGINAL_DLL):
+        return
+
+    pid_target = int(app_pid) if app_pid else 0
+    watch_usb_ps = "$true" if watch_usb else "$false"
+
+    wait_clause = (
+        f"$pidTarget={pid_target};"
+        f"$watchUsb={watch_usb_ps};"
+        f"$usbRoot='{ps_quote(USB_ROOT)}';"
+        "$deadline=(Get-Date).AddHours(12);"
+        "while ((Get-Date) -lt $deadline) {"
+        "  $alive=Get-Process -Name 'CHC Geomatics Office 2' -ErrorAction SilentlyContinue;"
+        "  if (-not $alive) { break };"
+        "  if ($watchUsb -and -not (Test-Path -LiteralPath $usbRoot)) {"
+        "    Stop-Process -Name 'CHC Geomatics Office 2' -Force -ErrorAction SilentlyContinue;"
+        "    Start-Sleep -Milliseconds 300;"
+        "    continue"
+        "  };"
+        "  if ($pidTarget -gt 0) {"
+        "    $tracked=$alive | Where-Object { $_.Id -eq $pidTarget };"
+        "    if (-not $tracked) { $pidTarget = 0 };"
+        "  };"
+        "  Start-Sleep -Milliseconds 250"
+        "};"
+    )
+
+    # Detached rescue survives launcher termination and restores original DLL promptly.
+    script = (
+        wait_clause
+        + f"$original='{ps_quote(ORIGINAL_DLL)}';"
+        + f"$target='{ps_quote(TARGET_DLL)}';"
+        + "$destDir=[System.IO.Path]::GetDirectoryName($target);"
+        + "if (-not [string]::IsNullOrWhiteSpace($destDir)) { New-Item -ItemType Directory -Path $destDir -Force | Out-Null };"
+        + "for ($i=0; $i -lt 1200; $i++) {"
+        + "  try { Copy-Item -LiteralPath $original -Destination $target -Force -ErrorAction Stop; break }"
+        + "  catch { Start-Sleep -Milliseconds 250 }"
+        + "}"
+    )
+
+    creation_flags = 0
+    for flag_name in ["DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP", "CREATE_NO_WINDOW"]:
+        creation_flags |= int(getattr(subprocess, flag_name, 0))
+
+    try:
+        subprocess.Popen(
+            [
+                "powershell",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-WindowStyle",
+                "Hidden",
+                "-Command",
+                script,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=creation_flags,
+            close_fds=True,
+        )
+    except Exception:
+        pass
+
+
 def safe_exit(reason, kill_running=False):
     with shutdown_guard:
         if not monitoring[0]:
             return
         monitoring[0] = False
     if kill_running:
+        # Fire independent rescue before killing app in case launcher is terminated abruptly.
+        start_restore_watchdog(watch_usb=False)
         kill_app()
-    restore()
+        wait_until_app_stopped(timeout_sec=120)
+
+    # Do a synchronous, long retry restore before final exit.
+    restore_with_wait(timeout_sec=120)
     os._exit(0)
 
 
@@ -334,6 +428,9 @@ def main():
     hide_console_window()
 
     setup_dlls()
+
+    # Self-heal stale state from previous crash/unplug before applying patched DLL.
+    restore()
     apply_dll()
 
     pid = launch()
@@ -342,6 +439,7 @@ def main():
 
     software_proc[0] = pid if hasattr(pid, "poll") else None
     software_pid[0] = pid.pid if hasattr(pid, "pid") else pid
+    start_restore_watchdog(software_pid[0], watch_usb=True)
 
     t = threading.Thread(target=monitor, daemon=True)
     t.start()
