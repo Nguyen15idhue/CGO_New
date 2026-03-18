@@ -8,15 +8,16 @@ import hashlib
 import json
 import signal
 import atexit
+import tempfile
 
-# License on USB (hidden), DLL in AppData only
+# USB root is still used for presence monitoring.
 USB_ROOT = os.path.dirname(sys.executable)
-LICENSE_FILE = os.path.join(USB_ROOT, ".lic")
 
-# DLL in AppData only
 APPDATA_DIR = os.path.join(
     os.environ.get("APPDATA", ""), r"CHCNAV\CHC Geomatics Office 2"
 )
+USB_LICENSE_FILE = os.path.join(USB_ROOT, ".lic")
+APPDATA_LICENSE_FILE = os.path.join(APPDATA_DIR, "license.dat")
 DLL_STORAGE_DIR = os.path.join(APPDATA_DIR, "DLL_Storage")
 CRACKED_DLL = os.path.join(DLL_STORAGE_DIR, "cracked.dll")
 ORIGINAL_DLL = os.path.join(DLL_STORAGE_DIR, "original.dll")
@@ -27,7 +28,9 @@ EXE_PATH = os.path.join(
 )
 
 software_pid = [None]
+software_proc = [None]
 monitoring = [True]
+shutdown_guard = threading.Lock()
 
 
 def cleanup():
@@ -82,24 +85,60 @@ def gen_key(pw):
     return f"CHC-{pw[:4]}-{pw[4:8]}-{pw[8:12]}"
 
 
-def check_lic():
-    if not os.path.exists(LICENSE_FILE):
-        return False
+def ensure_dir(path):
+    os.makedirs(path, exist_ok=True)
+
+
+def read_key_from_file(path):
+    if not os.path.exists(path):
+        return ""
     try:
-        with open(LICENSE_FILE, "r") as f:
-            return bool(json.load(f).get("key", ""))
-    except:
+        with open(path, "r") as f:
+            data = json.load(f)
+        return (data.get("key") or data.get("master_key") or "").strip().upper()
+    except Exception:
+        return ""
+
+
+def check_lic(expected_key):
+    # Security gate: license must exist and match on USB, not just AppData.
+    usb_key = read_key_from_file(USB_LICENSE_FILE)
+    if usb_key != expected_key:
         return False
+
+    # Keep AppData copy synchronized for diagnostics/compatibility.
+    appdata_key = read_key_from_file(APPDATA_LICENSE_FILE)
+    if appdata_key != expected_key:
+        save_lic(expected_key)
+    return True
 
 
 def save_lic(key):
-    with open(LICENSE_FILE, "w") as f:
-        json.dump({"key": key, "time": time.time()}, f)
+    ensure_dir(APPDATA_DIR)
+    payload = {"key": key, "time": time.time()}
+
+    def atomic_write_json(dest_file):
+        fd, tmp_path = tempfile.mkstemp(
+            prefix="lic_", suffix=".tmp", dir=os.path.dirname(dest_file)
+        )
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(payload, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, dest_file)
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    # USB file is mandatory.
+    atomic_write_json(USB_LICENSE_FILE)
+    # AppData file is a mirrored backup.
+    atomic_write_json(APPDATA_LICENSE_FILE)
 
 
 def setup_dlls():
-    if not os.path.exists(DLL_STORAGE_DIR):
-        os.makedirs(DLL_STORAGE_DIR)
+    ensure_dir(DLL_STORAGE_DIR)
 
     bundle = get_bundle_dir()
     cracked_src = os.path.join(bundle, "source_crack.dll")
@@ -114,8 +153,7 @@ def setup_dlls():
 def apply_dll():
     if os.path.exists(CRACKED_DLL):
         dest_dir = os.path.dirname(TARGET_DLL)
-        if not os.path.exists(dest_dir):
-            os.makedirs(dest_dir)
+        ensure_dir(dest_dir)
         shutil.copy2(CRACKED_DLL, TARGET_DLL)
 
 
@@ -130,12 +168,37 @@ def kill_app():
         pass
 
 
+def get_target_pids():
+    pids = []
+    try:
+        r = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq CHC Geomatics Office 2.exe"],
+            capture_output=True,
+            text=True,
+        )
+        for line in r.stdout.split("\n"):
+            if "CHC Geomatics Office 2.exe" not in line:
+                continue
+            parts = line.split()
+            if len(parts) >= 2 and parts[1].isdigit():
+                pids.append(int(parts[1]))
+    except Exception:
+        pass
+    return pids
+
+
 def restore():
     if os.path.exists(ORIGINAL_DLL):
         dest_dir = os.path.dirname(TARGET_DLL)
-        if not os.path.exists(dest_dir):
-            os.makedirs(dest_dir)
-        shutil.copy2(ORIGINAL_DLL, TARGET_DLL)
+        ensure_dir(dest_dir)
+        for _ in range(40):
+            try:
+                shutil.copy2(ORIGINAL_DLL, TARGET_DLL)
+                return True
+            except Exception:
+                time.sleep(0.25)
+        return False
+    return True
 
 
 def launch():
@@ -143,23 +206,34 @@ def launch():
         return None
     try:
         p = subprocess.Popen(
-            f'"{EXE_PATH}"',
-            shell=True,
+            [EXE_PATH],
+            shell=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        return p.pid
-    except:
+        return p
+    except Exception:
         try:
             os.startfile(EXE_PATH)
-            time.sleep(1)
+            time.sleep(1.5)
             r = subprocess.run(["tasklist"], capture_output=True, text=True)
             for line in r.stdout.split("\n"):
                 if "CHC Geomatics Office 2.exe" in line:
                     return int(line.split()[1])
-        except:
+        except Exception:
             pass
         return None
+
+
+def safe_exit(reason, kill_running=False):
+    with shutdown_guard:
+        if not monitoring[0]:
+            return
+        monitoring[0] = False
+    if kill_running:
+        kill_app()
+    restore()
+    os._exit(0)
 
 
 def monitor():
@@ -167,24 +241,29 @@ def monitor():
         time.sleep(0.5)
         # USB removed
         if not os.path.exists(USB_ROOT):
-            kill_app()
-            restore()
-            monitoring[0] = False
-            os._exit(0)
-        # App closed
-        if software_pid[0] and software_pid[0] != 0:
-            try:
-                r = subprocess.run(
-                    ["tasklist", "/FI", f"PID eq {software_pid[0]}"],
-                    capture_output=True,
-                    text=True,
-                )
-                if str(software_pid[0]) not in r.stdout:
-                    restore()
-                    monitoring[0] = False
-                    os._exit(0)
-            except:
-                pass
+            safe_exit("usb_removed", kill_running=True)
+
+        # App closed: consider both tracked PID and real process name.
+        pids = get_target_pids()
+        tracked = software_pid[0]
+        proc = software_proc[0]
+
+        if tracked is None and proc is None:
+            if not pids:
+                safe_exit("app_closed", kill_running=False)
+            continue
+
+        if proc is not None and proc.poll() is None:
+            continue
+
+        if tracked in pids:
+            continue
+
+        if pids:
+            software_pid[0] = pids[0]
+            continue
+
+        safe_exit("app_closed", kill_running=False)
 
 
 def main():
@@ -192,8 +271,10 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    if not check_lic():
-        pw = get_password()
+    pw = get_password()
+    expected_key = gen_key(pw)
+
+    if not check_lic(expected_key):
         print("=" * 45)
         print("ACTIVATION")
         print("=" * 45)
@@ -206,12 +287,12 @@ def main():
         except:
             sys.exit(1)
 
-        if key != gen_key(pw):
+        if key != expected_key:
             print("\nWrong key!")
             time.sleep(2)
             sys.exit(1)
 
-        save_lic(gen_key(pw))
+        save_lic(expected_key)
         print("\nOK!")
         time.sleep(1)
 
@@ -222,7 +303,8 @@ def main():
     if not pid and pid != 0:
         sys.exit(1)
 
-    software_pid[0] = pid
+    software_proc[0] = pid if hasattr(pid, "poll") else None
+    software_pid[0] = pid.pid if hasattr(pid, "pid") else pid
 
     t = threading.Thread(target=monitor, daemon=True)
     t.start()
