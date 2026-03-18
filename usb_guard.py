@@ -9,6 +9,7 @@ import json
 import signal
 import atexit
 import tempfile
+import ctypes
 
 # USB root is still used for presence monitoring.
 USB_ROOT = os.path.dirname(sys.executable)
@@ -49,36 +50,61 @@ def get_bundle_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
 
-def get_password():
+def get_usb_drive_root():
+    drive = os.path.splitdrive(os.path.abspath(USB_ROOT))[0]
+    if not drive:
+        return ""
+    return drive + "\\"
+
+
+def get_usb_fingerprint():
+    root = get_usb_drive_root()
+    if not root:
+        return ""
+
     try:
-        r = subprocess.run(
-            ["wmic", "cpu", "get", "ProcessorId"],
-            capture_output=True,
-            text=True,
-            timeout=5,
+        drive_type = ctypes.windll.kernel32.GetDriveTypeW(ctypes.c_wchar_p(root))
+        if drive_type != 2:
+            return ""
+
+        serial = ctypes.c_ulong(0)
+        max_component = ctypes.c_ulong(0)
+        fs_flags = ctypes.c_ulong(0)
+        volume_name = ctypes.create_unicode_buffer(261)
+        fs_name = ctypes.create_unicode_buffer(261)
+
+        ok = ctypes.windll.kernel32.GetVolumeInformationW(
+            ctypes.c_wchar_p(root),
+            volume_name,
+            260,
+            ctypes.byref(serial),
+            ctypes.byref(max_component),
+            ctypes.byref(fs_flags),
+            fs_name,
+            260,
         )
-        cpu = r.stdout.strip().split("\n")[-1].strip()
-        r = subprocess.run(
-            ["wmic", "bios", "get", "SerialNumber"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        bios = r.stdout.strip().split("\n")[-1].strip()
-        r = subprocess.run(
-            ["wmic", "baseboard", "get", "SerialNumber"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        mb = r.stdout.strip().split("\n")[-1].strip()
-        return (
-            hashlib.sha256(f"{cpu}-{bios}-{mb}-150925".encode())
-            .hexdigest()[:16]
-            .upper()
-        )
-    except:
-        return hashlib.sha256(b"DEFAULT-150925").hexdigest()[:16].upper()
+        if not ok:
+            return ""
+
+        return f"{serial.value:08X}"
+    except Exception:
+        return ""
+
+
+def get_password():
+    usb_fingerprint = get_usb_fingerprint()
+    if not usb_fingerprint:
+        return ""
+    return hashlib.sha256(f"USB-{usb_fingerprint}-150925".encode()).hexdigest()[:16].upper()
+
+
+def hide_console_window():
+    try:
+        hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+        if hwnd:
+            ctypes.windll.user32.ShowWindow(hwnd, 0)
+    except Exception:
+        pass
 
 
 def gen_key(pw):
@@ -272,9 +298,16 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
 
     pw = get_password()
+    if not pw:
+        print("Cannot detect USB identity. Run from a removable USB drive.")
+        time.sleep(2)
+        sys.exit(1)
+
     expected_key = gen_key(pw)
 
-    if not check_lic(expected_key):
+    already_licensed = check_lic(expected_key)
+
+    if not already_licensed:
         print("=" * 45)
         print("ACTIVATION")
         print("=" * 45)
@@ -295,6 +328,10 @@ def main():
         save_lic(expected_key)
         print("\nOK!")
         time.sleep(1)
+    else:
+        hide_console_window()
+
+    hide_console_window()
 
     setup_dlls()
     apply_dll()

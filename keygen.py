@@ -1,26 +1,29 @@
 import sys
-import os
-import hashlib
-import json
+import re
 
 
 # Admin KeyGen - Console only
-def generate_key(password):
-    return f"CHC-{password[:4]}-{password[4:8]}-{password[8:12]}"
+def normalize_code(raw):
+    return raw.strip().upper().replace("-", "").replace(" ", "")
+
+
+def generate_key(code):
+    return f"CHC-{code[:4]}-{code[4:8]}-{code[8:12]}"
 
 
 print("=" * 50)
 print("ADMIN - GENERATE ACTIVATION KEY")
 print("=" * 50)
-print("\nEnter customer code: ", end="")
+print("\nEnter customer code (16 HEX chars): ", end="")
 
 try:
-    code = input().strip().upper()
+    code = normalize_code(input())
 except:
     sys.exit(1)
 
-if len(code) < 12:
-    print("\nError: Code too short!")
+if not re.fullmatch(r"[0-9A-F]{16}", code):
+    print("\nError: Invalid code format!")
+    print("Expected: 16 hex characters from customer screen.")
     sys.exit(1)
 
 key = generate_key(code)
