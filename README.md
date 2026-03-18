@@ -43,7 +43,7 @@ Sau khi da kich hoat:
 ## Cach tao key cho khach hang (Admin)
 
 1. **Khach hang gui ma** (tu phan mem) cho ban
-2. **Chay file `KeyGen.exe`** (chi admin co)
+2. **Chay file `LicenseTool.exe`** (chi admin co)
 3. **Nhap ma cua khach hang** vao o "Nhap Ma"
 4. Bam "Tao Key" -> hien thi **Key Kich Hoat**
 5. **Gui key nay cho khach hang**
@@ -63,11 +63,11 @@ Sau khi da kich hoat:
    - `README.md` (huong dan su dung, tuy chon)
 
 2. **Khong can kem them:**
-   - KeyGen.exe (chi admin su dung, khong can phat cho khach)
+   - LicenseTool.exe (chi admin su dung, khong can phat cho khach)
 
 3. **Quy trinh:**
    - Khach hang chay phan mem, gui ma cho admin
-   - Admin chay KeyGen, nhap ma -> tao key
+   - Admin chay LicenseTool, nhap ma -> tao key
    - Admin gui key lai cho khach
    - Khach nhap key de kich hoat lan dau
 

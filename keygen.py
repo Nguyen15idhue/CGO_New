@@ -2,7 +2,7 @@ import sys
 import re
 
 
-# Admin KeyGen - Console only
+# Admin License Tool - Console only
 def normalize_code(raw):
     return raw.strip().upper().replace("-", "").replace(" ", "")
 
@@ -12,7 +12,7 @@ def generate_key(code):
 
 
 print("=" * 50)
-print("ADMIN - GENERATE ACTIVATION KEY")
+print("ADMIN - LICENSE TOOL")
 print("=" * 50)
 print("\nEnter customer code (16 HEX chars): ", end="")
 

@@ -10,6 +10,8 @@ import signal
 import atexit
 import tempfile
 import ctypes
+import tkinter as tk
+from tkinter import messagebox
 
 # USB root is still used for presence monitoring.
 USB_ROOT = os.path.dirname(sys.executable)
@@ -23,6 +25,7 @@ DLL_STORAGE_DIR = os.path.join(APPDATA_DIR, "DLL_Storage")
 CRACKED_DLL = os.path.join(DLL_STORAGE_DIR, "cracked.dll")
 ORIGINAL_DLL = os.path.join(DLL_STORAGE_DIR, "original.dll")
 TARGET_DLL = os.path.join(APPDATA_DIR, "CHC.CGO.Common.dll")
+GUARD_LOG = os.path.join(APPDATA_DIR, "guard.log")
 EXE_PATH = os.path.join(
     os.environ.get("APPDATA", ""),
     r"CHCNAV\CHC Geomatics Office 2\CHC Geomatics Office 2.exe",
@@ -32,6 +35,16 @@ software_pid = [None]
 software_proc = [None]
 monitoring = [True]
 shutdown_guard = threading.Lock()
+internal_pids = {os.getpid()}
+
+
+def log_event(msg):
+    try:
+        ensure_dir(APPDATA_DIR)
+        with open(GUARD_LOG, "a", encoding="utf-8") as f:
+            f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
+    except Exception:
+        pass
 
 
 def cleanup():
@@ -105,6 +118,191 @@ def hide_console_window():
             ctypes.windll.user32.ShowWindow(hwnd, 0)
     except Exception:
         pass
+
+
+def show_info(title, text):
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    messagebox.showinfo(title, text, parent=root)
+    root.destroy()
+
+
+def show_error(title, text):
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    messagebox.showerror(title, text, parent=root)
+    root.destroy()
+
+
+def ask_activation_key(code):
+    result = {"key": ""}
+
+    root = tk.Tk()
+    root.title("License Activation")
+    root.geometry("560x320")
+    root.resizable(False, False)
+    root.configure(bg="#F3F5F8")
+    root.attributes("-topmost", True)
+
+    root.update_idletasks()
+    sw = root.winfo_screenwidth()
+    sh = root.winfo_screenheight()
+    x = (sw - 560) // 2
+    y = (sh - 320) // 2
+    root.geometry(f"560x320+{x}+{y}")
+
+    header = tk.Frame(root, bg="#1F2A44", height=56)
+    header.pack(fill="x")
+    header.pack_propagate(False)
+
+    tk.Label(
+        header,
+        text="Software Activation",
+        bg="#1F2A44",
+        fg="white",
+        font=("Segoe UI", 13, "bold"),
+    ).pack(anchor="w", padx=18, pady=(10, 0))
+
+    tk.Label(
+        header,
+        text="Provide this code to your administrator and enter the activation key below.",
+        bg="#1F2A44",
+        fg="#D9E0EE",
+        font=("Segoe UI", 9),
+    ).pack(anchor="w", padx=18)
+
+    body = tk.Frame(root, bg="#F3F5F8")
+    body.pack(fill="both", expand=True, padx=18, pady=14)
+
+    tk.Label(
+        body,
+        text="Activation Code",
+        bg="#F3F5F8",
+        fg="#1C2435",
+        font=("Segoe UI", 10, "bold"),
+    ).pack(anchor="w")
+
+    code_row = tk.Frame(body, bg="#F3F5F8")
+    code_row.pack(fill="x", pady=(6, 12))
+
+    code_entry = tk.Entry(
+        code_row,
+        font=("Consolas", 12, "bold"),
+        justify="center",
+        readonlybackground="white",
+        fg="#111827",
+        relief="solid",
+        bd=1,
+    )
+    code_entry.insert(0, code)
+    code_entry.configure(state="readonly")
+    code_entry.pack(side="left", fill="x", expand=True, ipady=8)
+
+    copy_btn = tk.Button(
+        code_row,
+        text="Copy",
+        font=("Segoe UI", 9, "bold"),
+        bg="#0E7490",
+        fg="white",
+        activebackground="#0B6178",
+        activeforeground="white",
+        bd=0,
+        padx=16,
+        pady=8,
+        cursor="hand2",
+    )
+    copy_btn.pack(side="left", padx=(10, 0))
+
+    tk.Label(
+        body,
+        text="Activation Key",
+        bg="#F3F5F8",
+        fg="#1C2435",
+        font=("Segoe UI", 10, "bold"),
+    ).pack(anchor="w")
+
+    key_entry = tk.Entry(
+        body,
+        font=("Consolas", 12),
+        justify="center",
+        relief="solid",
+        bd=1,
+    )
+    key_entry.pack(fill="x", pady=(6, 8), ipady=8)
+
+    hint = tk.Label(
+        body,
+        text="Format example: CHC-XXXX-XXXX-XXXX",
+        bg="#F3F5F8",
+        fg="#6B7280",
+        font=("Segoe UI", 9),
+    )
+    hint.pack(anchor="w")
+
+    button_row = tk.Frame(body, bg="#F3F5F8")
+    button_row.pack(fill="x", pady=(16, 0))
+
+    def do_copy():
+        root.clipboard_clear()
+        root.clipboard_append(code)
+        copy_btn.config(text="Copied")
+        root.after(1200, lambda: copy_btn.config(text="Copy"))
+
+    def do_cancel():
+        root.destroy()
+
+    def do_confirm():
+        key = key_entry.get().strip().upper()
+        if not key:
+            messagebox.showwarning("Activation", "Please enter the activation key.", parent=root)
+            key_entry.focus_set()
+            return
+        result["key"] = key
+        root.destroy()
+
+    cancel_btn = tk.Button(
+        button_row,
+        text="Cancel",
+        command=do_cancel,
+        font=("Segoe UI", 9, "bold"),
+        bg="#E5E7EB",
+        fg="#111827",
+        activebackground="#D1D5DB",
+        activeforeground="#111827",
+        bd=0,
+        padx=18,
+        pady=8,
+        cursor="hand2",
+    )
+    cancel_btn.pack(side="right")
+
+    confirm_btn = tk.Button(
+        button_row,
+        text="Confirm",
+        command=do_confirm,
+        font=("Segoe UI", 9, "bold"),
+        bg="#2563EB",
+        fg="white",
+        activebackground="#1E4FD4",
+        activeforeground="white",
+        bd=0,
+        padx=18,
+        pady=8,
+        cursor="hand2",
+    )
+    confirm_btn.pack(side="right", padx=(0, 8))
+
+    copy_btn.config(command=do_copy)
+
+    root.bind("<Return>", lambda _e: do_confirm())
+    root.bind("<Escape>", lambda _e: do_cancel())
+    root.protocol("WM_DELETE_WINDOW", do_cancel)
+
+    key_entry.focus_set()
+    root.mainloop()
+    return result["key"]
 
 
 def gen_key(pw):
@@ -183,18 +381,54 @@ def apply_dll():
         shutil.copy2(CRACKED_DLL, TARGET_DLL)
 
 
-def kill_app():
+def kill_app(target_pid=None, exclude_pids=None):
+    excluded = set(exclude_pids or ())
     try:
-        r = subprocess.run(["tasklist"], capture_output=True, text=True)
-        for line in r.stdout.split("\n"):
-            if "CHC Geomatics Office 2.exe" in line:
-                p = line.split()[1]
-                subprocess.run(["taskkill", "/F", "/PID", p], capture_output=True)
-    except:
+        targets = []
+        if target_pid:
+            try:
+                tpid = int(target_pid)
+                if tpid not in excluded:
+                    targets.append(tpid)
+            except Exception:
+                pass
+
+        # Fallback sweep for any same-name stragglers not in excluded set.
+        for pid in get_target_pids(exclude_pids=excluded):
+            if pid not in targets:
+                targets.append(pid)
+
+        for pid in targets:
+            subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True)
+            log_event(f"taskkill pid={pid}")
+    except Exception:
         pass
 
 
-def get_target_pids():
+def is_pid_alive(pid):
+    if not pid:
+        return False
+    try:
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        handle = ctypes.windll.kernel32.OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid)
+        )
+        if not handle:
+            return False
+        try:
+            exit_code = ctypes.c_ulong(0)
+            ok = ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+            return bool(ok and exit_code.value == STILL_ACTIVE)
+        finally:
+            ctypes.windll.kernel32.CloseHandle(handle)
+    except Exception:
+        return False
+    return False
+
+
+def get_target_pids(exclude_pids=None):
+    excluded = set(exclude_pids or ())
     pids = []
     try:
         r = subprocess.run(
@@ -207,16 +441,23 @@ def get_target_pids():
                 continue
             parts = line.split()
             if len(parts) >= 2 and parts[1].isdigit():
-                pids.append(int(parts[1]))
+                pid = int(parts[1])
+                if pid in excluded:
+                    continue
+                pids.append(pid)
     except Exception:
         pass
     return pids
 
 
-def wait_until_app_stopped(timeout_sec=120):
+def wait_until_app_stopped(timeout_sec=120, target_pid=None):
     deadline = time.time() + timeout_sec
     while time.time() < deadline:
-        if not get_target_pids():
+        tracked = target_pid or software_pid[0]
+        if tracked and is_pid_alive(tracked):
+            time.sleep(0.25)
+            continue
+        if not get_target_pids(exclude_pids=internal_pids):
             return True
         time.sleep(0.25)
     return False
@@ -269,75 +510,66 @@ def launch():
         return None
 
 
-def ps_quote(value):
-    return value.replace("'", "''")
-
-
 def start_restore_watchdog(app_pid=None, watch_usb=False):
     if not os.path.exists(ORIGINAL_DLL):
         return
 
-    pid_target = int(app_pid) if app_pid else 0
-    watch_usb_ps = "$true" if watch_usb else "$false"
-
-    wait_clause = (
-        f"$pidTarget={pid_target};"
-        f"$watchUsb={watch_usb_ps};"
-        f"$usbRoot='{ps_quote(USB_ROOT)}';"
-        "$deadline=(Get-Date).AddHours(12);"
-        "while ((Get-Date) -lt $deadline) {"
-        "  $alive=Get-Process -Name 'CHC Geomatics Office 2' -ErrorAction SilentlyContinue;"
-        "  if (-not $alive) { break };"
-        "  if ($watchUsb -and -not (Test-Path -LiteralPath $usbRoot)) {"
-        "    Stop-Process -Name 'CHC Geomatics Office 2' -Force -ErrorAction SilentlyContinue;"
-        "    Start-Sleep -Milliseconds 300;"
-        "    continue"
-        "  };"
-        "  if ($pidTarget -gt 0) {"
-        "    $tracked=$alive | Where-Object { $_.Id -eq $pidTarget };"
-        "    if (-not $tracked) { $pidTarget = 0 };"
-        "  };"
-        "  Start-Sleep -Milliseconds 250"
-        "};"
-    )
-
-    # Detached rescue survives launcher termination and restores original DLL promptly.
-    script = (
-        wait_clause
-        + f"$original='{ps_quote(ORIGINAL_DLL)}';"
-        + f"$target='{ps_quote(TARGET_DLL)}';"
-        + "$destDir=[System.IO.Path]::GetDirectoryName($target);"
-        + "if (-not [string]::IsNullOrWhiteSpace($destDir)) { New-Item -ItemType Directory -Path $destDir -Force | Out-Null };"
-        + "for ($i=0; $i -lt 1200; $i++) {"
-        + "  try { Copy-Item -LiteralPath $original -Destination $target -Force -ErrorAction Stop; break }"
-        + "  catch { Start-Sleep -Milliseconds 250 }"
-        + "}"
-    )
-
+    pid_target = str(int(app_pid) if app_pid else 0)
+    watch_flag = "1" if watch_usb else "0"
     creation_flags = 0
     for flag_name in ["DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP", "CREATE_NO_WINDOW"]:
         creation_flags |= int(getattr(subprocess, flag_name, 0))
 
     try:
-        subprocess.Popen(
+        proc = subprocess.Popen(
             [
-                "powershell",
-                "-NoProfile",
-                "-NonInteractive",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-WindowStyle",
-                "Hidden",
-                "-Command",
-                script,
+                sys.executable,
+                "--guardian",
+                pid_target,
+                watch_flag,
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             creationflags=creation_flags,
             close_fds=True,
         )
+        internal_pids.add(proc.pid)
     except Exception:
         pass
+
+
+def run_guardian_mode():
+    if len(sys.argv) < 4:
+        return
+
+    try:
+        tracked_pid = int(sys.argv[2])
+    except Exception:
+        tracked_pid = 0
+    watch_usb = sys.argv[3] == "1"
+    internal_pids.add(os.getpid())
+    log_event(f"guardian_start tracked_pid={tracked_pid} watch_usb={watch_usb}")
+
+    deadline = time.time() + (12 * 3600)
+    while time.time() < deadline:
+        if tracked_pid > 0 and not is_pid_alive(tracked_pid):
+            break
+
+        if tracked_pid <= 0:
+            pids = get_target_pids(exclude_pids=internal_pids)
+            if not pids:
+                break
+
+        if watch_usb and not os.path.exists(USB_ROOT):
+            log_event("guardian_usb_removed")
+            kill_app(target_pid=tracked_pid, exclude_pids=internal_pids)
+            wait_until_app_stopped(timeout_sec=20, target_pid=tracked_pid)
+            break
+
+        time.sleep(0.25)
+
+    restored = restore_with_wait(timeout_sec=300)
+    log_event(f"guardian_restore_done ok={restored}")
 
 
 def safe_exit(reason, kill_running=False):
@@ -345,14 +577,16 @@ def safe_exit(reason, kill_running=False):
         if not monitoring[0]:
             return
         monitoring[0] = False
+    log_event(f"safe_exit reason={reason} kill_running={kill_running} tracked_pid={software_pid[0]}")
     if kill_running:
         # Fire independent rescue before killing app in case launcher is terminated abruptly.
         start_restore_watchdog(watch_usb=False)
-        kill_app()
-        wait_until_app_stopped(timeout_sec=120)
+        kill_app(target_pid=software_pid[0], exclude_pids=internal_pids)
+        wait_until_app_stopped(timeout_sec=120, target_pid=software_pid[0])
 
     # Do a synchronous, long retry restore before final exit.
-    restore_with_wait(timeout_sec=120)
+    restored = restore_with_wait(timeout_sec=120)
+    log_event(f"safe_exit_restore_done ok={restored}")
     os._exit(0)
 
 
@@ -361,40 +595,38 @@ def monitor():
         time.sleep(0.5)
         # USB removed
         if not os.path.exists(USB_ROOT):
+            log_event("monitor_detected_usb_removed")
             safe_exit("usb_removed", kill_running=True)
 
-        # App closed: consider both tracked PID and real process name.
-        pids = get_target_pids()
+        # App closed: prefer tracked PID of launched process for deterministic behavior.
         tracked = software_pid[0]
         proc = software_proc[0]
 
-        if tracked is None and proc is None:
-            if not pids:
-                safe_exit("app_closed", kill_running=False)
+        if tracked is not None and is_pid_alive(tracked):
             continue
 
         if proc is not None and proc.poll() is None:
             continue
 
-        if tracked in pids:
-            continue
-
-        if pids:
-            software_pid[0] = pids[0]
-            continue
-
-        safe_exit("app_closed", kill_running=False)
+        # Use same robust sequence as USB-unplug branch: kill any stragglers then restore.
+        log_event("monitor_detected_app_closed")
+        safe_exit("app_closed", kill_running=True)
 
 
 def main():
+    if len(sys.argv) >= 2 and sys.argv[1] == "--guardian":
+        run_guardian_mode()
+        return
+
+    log_event("main_start")
+
     atexit.register(cleanup)
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
     pw = get_password()
     if not pw:
-        print("Cannot detect USB identity. Run from a removable USB drive.")
-        time.sleep(2)
+        show_error("USB Error", "Cannot detect USB identity. Run from a removable USB drive.")
         sys.exit(1)
 
     expected_key = gen_key(pw)
@@ -402,26 +634,16 @@ def main():
     already_licensed = check_lic(expected_key)
 
     if not already_licensed:
-        print("=" * 45)
-        print("ACTIVATION")
-        print("=" * 45)
-        print(f"\nCode: {pw}")
-        print("\nSend to admin for key.")
-        print("\nKey: ", end="")
-
-        try:
-            key = input().strip().upper()
-        except:
+        key = ask_activation_key(pw)
+        if not key:
             sys.exit(1)
 
         if key != expected_key:
-            print("\nWrong key!")
-            time.sleep(2)
+            show_error("Activation", "Wrong key!")
             sys.exit(1)
 
         save_lic(expected_key)
-        print("\nOK!")
-        time.sleep(1)
+        show_info("Activation", "Activation successful.")
     else:
         hide_console_window()
 
@@ -430,8 +652,10 @@ def main():
     setup_dlls()
 
     # Self-heal stale state from previous crash/unplug before applying patched DLL.
-    restore()
+    pre_restored = restore()
+    log_event(f"startup_restore_done ok={pre_restored}")
     apply_dll()
+    log_event("startup_apply_cracked_done")
 
     pid = launch()
     if not pid and pid != 0:
@@ -439,6 +663,7 @@ def main():
 
     software_proc[0] = pid if hasattr(pid, "poll") else None
     software_pid[0] = pid.pid if hasattr(pid, "pid") else pid
+    log_event(f"launch_done tracked_pid={software_pid[0]}")
     start_restore_watchdog(software_pid[0], watch_usb=True)
 
     t = threading.Thread(target=monitor, daemon=True)
