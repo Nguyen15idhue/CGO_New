@@ -1,0 +1,13 @@
+# Windows reserved name accidentally present in tree
+nul
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Build artifacts
+build/
+dist/
+*.exe
+*.zip
+.ruff_cache/
