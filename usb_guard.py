@@ -370,8 +370,40 @@ def setup_dlls():
 
     if os.path.exists(cracked_src) and not os.path.exists(CRACKED_DLL):
         shutil.copy2(cracked_src, CRACKED_DLL)
-    if os.path.exists(original_src) and not os.path.exists(ORIGINAL_DLL):
+    if os.path.exists(original_src):
         shutil.copy2(original_src, ORIGINAL_DLL)
+
+
+def file_sha256(path):
+    if not os.path.exists(path):
+        return ""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest().upper()
+
+
+def refresh_original_from_bundle(force=False):
+    bundle = get_bundle_dir()
+    original_src = os.path.join(bundle, "source_original.dll")
+    if not os.path.exists(original_src):
+        return False
+    try:
+        if force:
+            shutil.copy2(original_src, ORIGINAL_DLL)
+            return True
+        if not os.path.exists(ORIGINAL_DLL):
+            shutil.copy2(original_src, ORIGINAL_DLL)
+            return True
+        src_hash = file_sha256(original_src)
+        dst_hash = file_sha256(ORIGINAL_DLL)
+        if src_hash and src_hash != dst_hash:
+            shutil.copy2(original_src, ORIGINAL_DLL)
+            return True
+    except Exception as e:
+        log_event(f"refresh_original_from_bundle_failed error={e}")
+    return False
 
 
 def apply_dll():
@@ -464,6 +496,8 @@ def wait_until_app_stopped(timeout_sec=120, target_pid=None):
 
 
 def restore():
+    # Always refresh original.dll from bundled source_original.dll when available.
+    refresh_original_from_bundle(force=True)
     if os.path.exists(ORIGINAL_DLL):
         dest_dir = os.path.dirname(TARGET_DLL)
         ensure_dir(dest_dir)
@@ -488,6 +522,7 @@ def restore_with_wait(timeout_sec=120):
 
 def launch():
     if not os.path.exists(EXE_PATH):
+        log_event(f"launch_missing_target path={EXE_PATH}")
         return None
     try:
         p = subprocess.Popen(
@@ -496,16 +531,22 @@ def launch():
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        log_event(f"launch_popen_ok pid={p.pid}")
         return p
-    except Exception:
+    except Exception as e:
+        log_event(f"launch_popen_failed error={e}")
         try:
             os.startfile(EXE_PATH)
             time.sleep(1.5)
             r = subprocess.run(["tasklist"], capture_output=True, text=True)
             for line in r.stdout.split("\n"):
                 if "CHC Geomatics Office 2.exe" in line:
-                    return int(line.split()[1])
-        except Exception:
+                    pid = int(line.split()[1])
+                    log_event(f"launch_startfile_ok pid={pid}")
+                    return pid
+            log_event("launch_startfile_no_pid")
+        except Exception as e2:
+            log_event(f"launch_startfile_failed error={e2}")
             pass
         return None
 
@@ -536,6 +577,70 @@ def start_restore_watchdog(app_pid=None, watch_usb=False):
         internal_pids.add(proc.pid)
     except Exception:
         pass
+
+
+def ps_single_quote(text):
+    return (text or "").replace("'", "''")
+
+
+def start_restore_worker(target_pid=None, kill_target=False):
+    pid_value = 0
+    try:
+        pid_value = int(target_pid or 0)
+    except Exception:
+        pid_value = 0
+
+    ps = (
+        "$ErrorActionPreference='SilentlyContinue'; "
+        f"$pidTarget={pid_value}; "
+        f"$killTarget={(1 if kill_target else 0)}; "
+        f"$src='{ps_single_quote(ORIGINAL_DLL)}'; "
+        f"$dst='{ps_single_quote(TARGET_DLL)}'; "
+        "if ($killTarget -eq 1 -and $pidTarget -gt 0) { Stop-Process -Id $pidTarget -Force -ErrorAction SilentlyContinue }; "
+        "$deadline=(Get-Date).AddMinutes(5); "
+        "while ((Get-Date) -lt $deadline) { "
+        "  if ($pidTarget -gt 0) { if (Get-Process -Id $pidTarget -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 200; continue } }; "
+        "  if (!(Test-Path $src)) { Start-Sleep -Milliseconds 400; continue }; "
+        "  try { "
+        "    Copy-Item -Path $src -Destination $dst -Force; "
+        "    $h1=(Get-FileHash -Path $src -Algorithm SHA256).Hash; "
+        "    $h2=(Get-FileHash -Path $dst -Algorithm SHA256).Hash; "
+        "    if ($h1 -eq $h2) { exit 0 } "
+        "  } catch { }; "
+        "  Start-Sleep -Milliseconds 300; "
+        "}; "
+        "exit 1"
+    )
+
+    creation_flags = 0
+    for flag_name in ["DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP", "CREATE_NO_WINDOW"]:
+        creation_flags |= int(getattr(subprocess, flag_name, 0))
+
+    try:
+        proc = subprocess.Popen(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-WindowStyle",
+                "Hidden",
+                "-Command",
+                ps,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=creation_flags,
+            close_fds=True,
+        )
+        internal_pids.add(proc.pid)
+        log_event(
+            f"restore_worker_started pid={proc.pid} target_pid={pid_value} kill_target={kill_target}"
+        )
+        return True
+    except Exception as e:
+        log_event(f"restore_worker_start_failed error={e}")
+        return False
 
 
 def run_guardian_mode():
@@ -578,9 +683,11 @@ def safe_exit(reason, kill_running=False):
             return
         monitoring[0] = False
     log_event(f"safe_exit reason={reason} kill_running={kill_running} tracked_pid={software_pid[0]}")
+    # Independent worker is the most reliable final safety net for repeated runs.
+    start_restore_worker(target_pid=software_pid[0], kill_target=kill_running)
+
     if kill_running:
-        # Fire independent rescue before killing app in case launcher is terminated abruptly.
-        start_restore_watchdog(watch_usb=False)
+        # Keep in-process kill/wait as immediate path; worker above remains fallback.
         kill_app(target_pid=software_pid[0], exclude_pids=internal_pids)
         wait_until_app_stopped(timeout_sec=120, target_pid=software_pid[0])
 
@@ -591,8 +698,32 @@ def safe_exit(reason, kill_running=False):
 
 
 def monitor():
+    last_hash_check = 0.0
     while monitoring[0]:
         time.sleep(0.5)
+
+        now = time.time()
+        if now - last_hash_check >= 1.0:
+            last_hash_check = now
+            try:
+                original_hash = file_sha256(ORIGINAL_DLL)
+                target_hash = file_sha256(TARGET_DLL)
+                tracked = software_pid[0]
+                proc = software_proc[0]
+                app_running = False
+                if tracked is not None and is_pid_alive(tracked):
+                    app_running = True
+                elif proc is not None and proc.poll() is None:
+                    app_running = True
+                elif get_target_pids(exclude_pids=internal_pids):
+                    app_running = True
+
+                if original_hash and target_hash and original_hash != target_hash and not app_running:
+                    log_event("hash_guard_detected_mismatch_app_not_running")
+                    safe_exit("hash_guard_restore", kill_running=False)
+            except Exception as e:
+                log_event(f"hash_guard_check_failed error={e}")
+
         # USB removed
         if not os.path.exists(USB_ROOT):
             log_event("monitor_detected_usb_removed")
@@ -659,12 +790,13 @@ def main():
 
     pid = launch()
     if not pid and pid != 0:
-        sys.exit(1)
+        log_event("launch_failed_enter_safe_exit")
+        safe_exit("launch_failed", kill_running=False)
+        return
 
     software_proc[0] = pid if hasattr(pid, "poll") else None
     software_pid[0] = pid.pid if hasattr(pid, "pid") else pid
     log_event(f"launch_done tracked_pid={software_pid[0]}")
-    start_restore_watchdog(software_pid[0], watch_usb=True)
 
     t = threading.Thread(target=monitor, daemon=True)
     t.start()
